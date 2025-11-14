@@ -1,0 +1,7 @@
+.idea
+.venv
+
+chroma_db
+
+*.mp4
+*.pdf

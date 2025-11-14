@@ -1,0 +1,11 @@
+pdf2image
+moviepy
+transformers
+torch
+librosa
+soundfile
+langchain
+langchain_text_splitters
+sentence-transformers
+chromadb
+requests
