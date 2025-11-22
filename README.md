@@ -3,7 +3,7 @@ RAG Chatbot for "Databases for GenAI" lecture.
 This script contains next functionality:
 1.  Loading Data:
     - Converts PDF pages to images and uses a Gemini VLM API to extract text.
-    - Transcribes audio from video file using AWS Whisper.
+    - Transcribes audio from video file using OpenAI Whisper.
 2.  Chunking Text:
     - Splits the combined text into semantically meaningful chunks.
 3.  Embedding & Storing Data:

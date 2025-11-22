@@ -4,7 +4,7 @@ RAG Chatbot for "Databases for GenAI" lecture.
 This script contains next functionality:
 1.  Loading Data:
     - Converts PDF pages to images and uses a Gemini VLM API to extract text.
-    - Transcribes audio from video file using AWS Whisper.
+    - Transcribes audio from video file using OpenAI Whisper.
 2.  Chunking Text:
     - Splits the combined text into semantically meaningful chunks.
 3.  Embedding & Storing Data:
@@ -30,35 +30,29 @@ To run this pipeline::
     `python rag_pipeline.py`
 """
 
-import os
-import requests
-import json
-import chromadb
-import torch
 import base64
 import io
+import json
+import os
 import time
 
-# PDF-to-image processing
-from pdf2image import convert_from_path
-
-# Audio/Video processing
-from moviepy.video.io.VideoFileClip import VideoFileClip
+import chromadb
 import librosa
+import requests
+import torch
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from moviepy.video.io.VideoFileClip import VideoFileClip
+from pdf2image import convert_from_path
+from sentence_transformers import SentenceTransformer
 from transformers import pipeline
 
-# Text processing
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+# --- CONFIGURATION ---
 
-# Embedding model
-from sentence_transformers import SentenceTransformer
-
-# --- CONFIGURATION SECTION ---
 # Data files
 PDF_PATH = "Databases_for_GenAI.pdf"
 VIDEO_PATH = "Databases_for_GenAI.mp4"
 
-#ChromaDB
+# ChromaDB
 CHROMA_DB_PATH = "./chroma_db"
 COLLECTION_NAME = "genai_datastore"
 
@@ -67,16 +61,29 @@ EMBEDDING_MODEL_NAME = "all-MiniLM-L6-v2"
 WHISPER_MODEL_NAME = "openai/whisper-base"
 GEMINI_MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
 
-# !!! PASTE YOUR GEMINI API KEY HERE !!!
+# IMPORTANT: SET YOUR GEMINI API KEY HERE
 GEMINI_API_KEY = ""
 
-#Tweaks
+# Parameters to tweak
 CHUNK_SIZE = 1000 # Number of characters used for text chunking
 CHUNK_OVERLAP = 100 # Number of characters for overlapping text between chunks
 CONTEXT_CHUNK_NUMBER = 10 # Number of results used for RAG context when generating answer
 
-# --- STEP 1: LOAD AND PROCESS DATA ---
+
 def extract_text_from_images(image_list: list) -> str:
+    """
+    Extracts text content from a list of PDF page images using the Gemini VLM API.
+    This function iterates through the provided images, converts them to base64,
+    and sends them to the Gemini API for text transcription. It applies
+    exponential backoff for API robustness and includes a delay to manage
+    rate limits (15 QPM for the free tier).
+
+    Args:
+        image_list (list): a list of Image objects, where each image represents a page from the source PDF.
+
+    Returns:
+        str: a string with all the extracted text from all pages.
+    """
     if not GEMINI_API_KEY:
         print("Error: GEMINI_API_KEY is not set.")
         return ""
@@ -164,8 +171,19 @@ def extract_text_from_images(image_list: list) -> str:
     return full_text
 
 
-def load_pdf_and_extract_vlm(file_path: str) -> str:
+def load_pdf_and_extract_text(file_path: str) -> str:
+    """
+    Converts a PDF file into a sequence of images and delegates text extraction
+    to the Vision Language Model (VLM) via `extract_text_from_images`.
+
+    Args:
+        file_path (str): the local path to the input PDF file.
+
+    Returns:
+        str: the combined extracted text from all PDF pages.
+    """
     print(f"Converting PDF {file_path} to images for Gemini processing...")
+
     try:
         images = convert_from_path(file_path)
 
@@ -184,6 +202,16 @@ def load_pdf_and_extract_vlm(file_path: str) -> str:
 
 
 def extract_audio_from_video(video_path: str) -> str:
+    """
+    Extracts the audio track from a video file and saves it as a temporary WAV file.
+    This temporary file is used for subsequent transcription.
+
+    Args:
+        video_path (str): the local path to the input video file.
+
+    Returns:
+        str: the file path of the temporary WAV audio file.
+    """
     print(f"Extracting audio from {video_path}...")
 
     audio_path = "temp_audio.wav"
@@ -203,10 +231,21 @@ def extract_audio_from_video(video_path: str) -> str:
 
 
 def transcribe_audio(audio_path: str, whisper_pipeline) -> str:
+    """
+    Transcribes the speech content from an audio file using OpenAI Whisper model.
+    The temporary audio file is deleted afterward.
+
+    Args:
+        audio_path (str): the local path to the temporary WAV audio file.
+        whisper_pipeline: A loaded Whisper `pipeline` object for automatic speech recognition.
+
+    Returns:
+        str: the full transcribed text from the audio file.
+    """
     print(f"Transcribing audio from {audio_path}...")
 
     try:
-        # Transform audio file into the correct format for AWS Whisper
+        # Transform audio file into the correct format for OpenAI Whisper
         speech, sample_rate = librosa.load(audio_path, sr=16000)
 
         result = whisper_pipeline(
@@ -229,8 +268,18 @@ def transcribe_audio(audio_path: str, whisper_pipeline) -> str:
             os.remove(audio_path)
 
 
-# --- STEP 2: CHUNK THE TEXT WITH LANGCHAIN ---
 def chunk_text(full_text: str) -> list[str]:
+    """
+    Splits the combined document and transcription text into smaller, semantically meaningful chunks for embedding.
+    Uses LangChain's RecursiveCharacterTextSplitter for robust chunking that attempts
+    to keep content coherent based on separators.
+
+    Args:
+        full_text (str): the entire combined text from all sources (PDF and video).
+
+    Returns:
+        list[str]: a list of text strings (chunks).
+    """
     print(f"Chunking text of {len(full_text)} characters...")
 
     text_splitter = RecursiveCharacterTextSplitter(
@@ -246,8 +295,18 @@ def chunk_text(full_text: str) -> list[str]:
     return chunks
 
 
-# --- STEP 3: EMBED AND STORE IN CHROMA DB ---
 def setup_vector_storage(chunks: list[str], embedding_model) -> chromadb.Collection:
+    """
+    Initializes a ChromaDB instance, generates vector embeddings for all text chunks,
+    and stores the chunks and embeddings in a collection.
+
+    Args:
+        chunks (list[str]): the list of text chunks to be stored.
+        embedding_model: a loaded SentenceTransformer model used to generate the vector embeddings.
+
+    Returns:
+        chromadb.Collection: The ChromaDB collection object containing the stored data.
+    """
     print("Setting up ChromaDB storage...")
 
     client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
@@ -276,8 +335,19 @@ def setup_vector_storage(chunks: list[str], embedding_model) -> chromadb.Collect
     return collection
 
 
-# --- STEP 4: RETRIEVE CONTEXT AND GENERATE ANSWER ---
 def retrieve_context(question: str, collection: chromadb.Collection, embedding_model) -> str:
+    """
+    Retrieves the most relevant text chunks from the vector database based on the user's question.
+    The question is first embedded, and then a similarity search is performed against the stored chunk embeddings.
+
+    Args:
+        question (str): the user's input question.
+        collection (chromadb.Collection): the ChromaDB collection to query.
+        embedding_model: the SentenceTransformer model used for embedding.
+
+    Returns:
+        str: a string concatenating the retrieved documents, separated by delimiters for the LLM.
+    """
     print(f"Retrieving context for question: '{question}'")
 
     query_embedding = embedding_model.encode([question]).tolist()
@@ -290,11 +360,22 @@ def retrieve_context(question: str, collection: chromadb.Collection, embedding_m
 
     context = "\n\n---\n\n".join(results['documents'][0])
     print(f"Retrieved context for question: '{context}'")
-
     return context
 
 
 def generate_answer(question: str, context: str) -> str:
+    """
+    Generates a final answer to the user's question using the Gemini API.
+    The model is instructed via a system prompt to strictly use the provided
+    context and to refuse to answer if the information is unavailable.
+
+    Args:
+        question (str): the user's original question.
+        context (str): the relevant text retrieved from the vector store.
+
+    Returns:
+        str: the final generated answer from the LLM.
+    """
     print("Generating answer with Gemini...")
 
     if not GEMINI_API_KEY:
@@ -359,8 +440,16 @@ def generate_answer(question: str, context: str) -> str:
         return f"Error: Failed to connect to Gemini API. {e}"
 
 
-# --- MAIN PIPELINE EXECUTION ---
 def main():
+    """
+    The main execution function for the RAG chatbot pipeline.
+    It performs the following steps:
+    1. Loads the embedding and transcription models.
+    2. Extracts text from the PDF slides (Gemini VLM) and transcribes the video audio (OpenAI Whisper).
+    3. Chunks the combined text.
+    4. Embeds the chunks and stores them in ChromaDB.
+    5. Enters a loop to continuously take user input, retrieve context, and generate answers.
+    """
     print("--- Starting RAG Chatbot Pipeline ---")
 
     print(f"Loading embedding model: {EMBEDDING_MODEL_NAME}...")
@@ -377,7 +466,7 @@ def main():
 
     # --- DATA LOADING PHASE ---
     # Step 1: Load Data
-    pdf_text = load_pdf_and_extract_vlm(PDF_PATH)
+    pdf_text = load_pdf_and_extract_text(PDF_PATH)
     audio_file_path = extract_audio_from_video(VIDEO_PATH)
 
     audio_text = ""
